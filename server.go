@@ -5,12 +5,18 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
+	"sync"
 	"time"
 )
 
 var clients []net.Conn
+var rooms map[string][]net.Conn
+var roomsMutex sync.Mutex
 
 func main() {
+	rooms = make(map[string][]net.Conn)
+
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		fmt.Println("Error listening:", err.Error())
@@ -49,21 +55,88 @@ func handleClient(conn net.Conn) {
 			return
 		}
 
-		// Broadcast message to all clients
-		broadcastMessage(message, conn)
+		parts := strings.Split(strings.TrimSpace(message), " ")
+		if len(parts) > 0 && strings.HasPrefix(parts[0], "/") {
+			// It's a command
+			handleCommand(parts, conn)
+		} else {
+			// It's a regular message
+			broadcastMessage(message, conn)
+		}
+	}
+}
+
+func handleCommand(parts []string, conn net.Conn) {
+	switch parts[0] {
+	case "/help":
+		_, _ = conn.Write([]byte("Available commands:\n"))
+		_, _ = conn.Write([]byte("/create <room_number>: Create a new room\n"))
+		_, _ = conn.Write([]byte("/join <room_number>: Join an existing room\n"))
+	default:
+		if len(parts) < 2 {
+			_, _ = conn.Write([]byte("Invalid command format. Type '/help' for available commands.\n"))
+			return
+		}
+		roomNumber := parts[1]
+		switch parts[0] {
+		case "/create":
+			createRoom(roomNumber, conn)
+		case "/join":
+			joinRoom(roomNumber, conn)
+		default:
+			_, _ = conn.Write([]byte("Unknown command. Type '/help' for available commands.\n"))
+		}
+	}
+}
+
+func createRoom(roomNumber string, conn net.Conn) {
+	roomsMutex.Lock()
+	defer roomsMutex.Unlock()
+
+	// Check if room already exists
+	if _, exists := rooms[roomNumber]; exists {
+		_, _ = conn.Write([]byte("Room " + roomNumber + " already exists.\n"))
+	} else {
+		// Create a new room and add the client to it
+		rooms[roomNumber] = []net.Conn{conn}
+		_, _ = conn.Write([]byte("Room " + roomNumber + " created. You are now in this room.\n"))
+	}
+}
+
+func joinRoom(roomNumber string, conn net.Conn) {
+	roomsMutex.Lock()
+	defer roomsMutex.Unlock()
+
+	// Check if room exists
+	if roomClients, exists := rooms[roomNumber]; exists {
+		for _, clients := range rooms {
+			for i, client := range clients {
+				if client == conn {
+					// Remove the client from the slice
+					clients = append(clients[:i], clients[i+1:]...)
+					break
+				}
+			}
+		}
+		// Add the client to the existing room
+		rooms[roomNumber] = append(roomClients, conn)
+		_, _ = conn.Write([]byte("Joined room " + roomNumber + ".\n"))
+	} else {
+		_, _ = conn.Write([]byte("Room " + roomNumber + " does not exist.\n"))
 	}
 }
 
 func broadcastMessage(message string, sender net.Conn) {
 	// Get list of all connected clients
-	clients := getClients()
 	currentTime := time.Now().Format("2006-01-02 15:04:05")
 	message = fmt.Sprintf("[%s] from %s: %s", currentTime, sender.RemoteAddr(), message)
 
 	logMessageToFile(message)
 
+	clientsCopy := getClients()
+
 	// Broadcast message to all clients except the sender
-	for _, client := range clients {
+	for _, client := range clientsCopy {
 		if client != sender {
 			_, _ = client.Write([]byte(message))
 		}
@@ -86,5 +159,12 @@ func logMessageToFile(message string) {
 }
 
 func getClients() []net.Conn {
-	return clients
+	var clientsCopy []net.Conn
+	roomsMutex.Lock()
+	defer roomsMutex.Unlock()
+
+	for _, roomClients := range rooms {
+		clientsCopy = append(clientsCopy, roomClients...)
+	}
+	return clientsCopy
 }
